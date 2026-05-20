@@ -30,9 +30,17 @@ COPY ["Mailer Viewer.html", "/app/public/index.html"]
 # file from /app/seed-uploads into UPLOAD_DIR if it isn't already there.
 COPY uploads/ /app/seed-uploads/
 
-# Drop privileges.
-RUN chown -R node:node /app /data
-USER node
+# Drop privileges. We use UID 568 (the "apps" user on TrueNAS Scale and
+# the convention adopted by most NAS-friendly images) so bind-mounted
+# datasets owned by apps:apps are writable out of the box. The node
+# user that ships with the base image is removed in favor of an apps
+# user at the right UID/GID. Override at runtime with `user: "X:Y"`
+# in compose if your host uses a different UID convention.
+RUN deluser --remove-home node \
+ && addgroup -g 568 apps \
+ && adduser -u 568 -G apps -S -H apps \
+ && chown -R 568:568 /app /data
+USER 568:568
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD wget -qO- http://127.0.0.1:${PORT}/healthz || exit 1
