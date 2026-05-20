@@ -1,0 +1,11 @@
+.git
+.gitignore
+.DS_Store
+.claude
+screenshots
+*.md
+docker-compose.yml
+.dockerignore
+Dockerfile
+node_modules
+npm-debug.log

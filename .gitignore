@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Local Claude Code preferences (machine-specific)
+.claude/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Local environment overrides
+.env
+.env.local
+
+# OS / editor crud
+*.swp
+*.swo
+Thumbs.db

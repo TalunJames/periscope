@@ -1,0 +1,40 @@
+# TrueNAS Scale → Apps → Discover Apps → Custom App
+# Paste this YAML and tweak HOST_PORT if 8080 is taken.
+#
+# After it's running, point your existing cloudflared tunnel at
+#   http://<truenas-lan-ip>:8080
+# and Cloudflare will publish it under your firm's subdomain.
+#
+# To update the app: docker compose build --no-cache && docker compose up -d
+
+services:
+  mailer-viewer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mailer-viewer:latest
+    container_name: mailer-viewer
+    restart: unless-stopped
+    environment:
+      # Leave ADMIN_KEY unset for open mode (any visitor can upload).
+      # If you ever want to gate uploads, set it to a long random string;
+      # the editor admin will paste the same value in the "Admin token"
+      # field. Listing PDFs and viewing share-links stay open either way.
+      ADMIN_KEY: ""
+      # Max single-file upload size, in MB.
+      MAX_UPLOAD_MB: "75"
+    ports:
+      # host:container — change the left side if 8080 is taken on TrueNAS.
+      - "8080:80"
+    volumes:
+      # Named volume keeps the library across container rebuilds.
+      - mailer_uploads:/data/uploads
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  mailer_uploads:
