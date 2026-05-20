@@ -295,6 +295,79 @@ function clipLineToXRange(line, x0, x1) {
 }
 
 // ---------------------------------------------------------------------
+// Compute the world-space Z component of a panel face's surface normal,
+// given the panel's hinge angle, the fold axis, the side (inside/outside),
+// and the current camera rotation. The face is facing the camera when
+// this value is positive — used to hide pins on faces that are currently
+// turned away from the viewer (e.g. an "inside" note when the mailer is
+// closed and the cover is facing the camera).
+// ---------------------------------------------------------------------
+function faceNormalZ(side, panelAngleDeg, axis, cameraXDeg, cameraYDeg) {
+  // Local face normal in panel-local coords. face-front = +Z, face-back
+  // = -Z (the face-back element has a baked-in CSS rotate of 180°, so
+  // its visible side faces opposite to face-front).
+  let nx = 0, ny = 0, nz = side === 'outside' ? -1 : 1;
+
+  // Step 1: panel hinge rotation. Vertical fold uses rotateX(-angle),
+  // horizontal uses rotateY(angle). See the matching transforms in
+  // renderPanel for the source-of-truth.
+  if (axis === 'vertical') {
+    const a = -panelAngleDeg * Math.PI / 180;
+    const c = Math.cos(a), s = Math.sin(a);
+    const ny2 = ny * c - nz * s;
+    const nz2 = ny * s + nz * c;
+    ny = ny2; nz = nz2;
+  } else {
+    const a = panelAngleDeg * Math.PI / 180;
+    const c = Math.cos(a), s = Math.sin(a);
+    const nx2 = nx * c + nz * s;
+    const nz2 = -nx * s + nz * c;
+    nx = nx2; nz = nz2;
+  }
+
+  // Step 2: scene rotation `rotateX(cx) rotateY(cy)` — applied to local
+  // points as R_x * R_y * v, i.e. rotateY first, then rotateX.
+  {
+    const a = cameraYDeg * Math.PI / 180;
+    const c = Math.cos(a), s = Math.sin(a);
+    const nx2 = nx * c + nz * s;
+    const nz2 = -nx * s + nz * c;
+    nx = nx2; nz = nz2;
+  }
+  {
+    const a = cameraXDeg * Math.PI / 180;
+    const c = Math.cos(a), s = Math.sin(a);
+    const ny2 = ny * c - nz * s;
+    const nz2 = ny * s + nz * c;
+    ny = ny2; nz = nz2;
+  }
+  return nz;
+}
+
+// Filter annotations down to those whose face is currently visible to
+// the camera. Two checks combine:
+//   1. Face normal must point toward the camera (eliminates pins on
+//      faces that have rotated away — e.g. an inside pin viewed from
+//      the cover side).
+//   2. Occlusion: inside pins are also gated on the mailer being open
+//      enough. The anchor's face-front is mathematically "facing the
+//      camera" even when the cover flap is physically on top of it,
+//      so we also require fold > 0.35 for any inside pin to show.
+//      Outside pins don't need this — the cover panels are always
+//      exposed from one side or the other.
+function getCameraFacingAnnotations(annotations, panelAngles, vertical, camera, fold) {
+  const axis = vertical ? 'vertical' : 'horizontal';
+  const INSIDE_OCCLUSION_FOLD = 0.35;
+  return annotations.filter(a => {
+    const side = a.side || 'inside';
+    if (side === 'inside' && fold < INSIDE_OCCLUSION_FOLD) return false;
+    const angle = panelAngles[a.panelIdx] || 0;
+    const z = faceNormalZ(side, angle, axis, camera.x, camera.y);
+    return z > 0.15;
+  });
+}
+
+// ---------------------------------------------------------------------
 // PinAnchor — invisible 3D-positioned marker for an annotation. Lives
 // inside the panel face so the browser computes its on-screen position
 // every frame as the mailer folds/orbits/zooms. The PinOverlay reads
@@ -933,9 +1006,11 @@ const MailerViewer = ({
 
       {/* Screen-space annotation overlay — pins/popups rendered outside
           the 3D scene so they stay crisp, never clip on panel edges, and
-          remain upright regardless of fold or page-orient flips. */}
+          remain upright regardless of fold or page-orient flips. Pins
+          on back-facing panel faces are filtered out so an inside note
+          doesn't bleed through to the closed cover. */}
       <PinOverlay
-        annotations={config.annotations || []}
+        annotations={getCameraFacingAnnotations(config.annotations || [], angles, vertical, camera, fold)}
         adminMode={adminMode}
         viewportRef={viewportRef}
         editingId={editingAnnotation}
