@@ -841,6 +841,34 @@ const MailerEditor = ({
             </section>
 
             <section className="edt-section">
+              <h4>Mailer details</h4>
+              <div className="edt-hint">
+                Shown to clients at the top of the share view. Saved per
+                mailer — switching to a different PDF restores its own text.
+              </div>
+              <div className="edt-row">
+                <label className="edt-row-label">Title</label>
+                <input
+                  className="edt-field"
+                  type="text"
+                  placeholder={config.pdfName || 'Mailer title'}
+                  value={config.pdfTitle || ''}
+                  onChange={e => update({ pdfTitle: e.target.value })}
+                />
+              </div>
+              <div className="edt-row">
+                <label className="edt-row-label">Description</label>
+                <textarea
+                  className="edt-field"
+                  rows="3"
+                  placeholder="A short note for the client — what this mailer is, the campaign, anything they should know."
+                  value={config.pdfDescription || ''}
+                  onChange={e => update({ pdfDescription: e.target.value })}
+                />
+              </div>
+            </section>
+
+            <section className="edt-section">
               <h4>Page size</h4>
               <select
                 className="edt-field"

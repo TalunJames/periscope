@@ -17,12 +17,15 @@ const BG_PRESETS = {
   daylight: "linear-gradient(180deg, #d8e4ec 0%, #a8b5be 60%, #6e7882 100%)",
 };
 
-// Fold short of 180° so the flaps tilt forward into +Z. At exactly 180°
-// the flap is coplanar with the anchor, which (a) hides the visible 3D
-// angle and (b) lets sub-pixel GPU jitter leak the face-front (interior)
-// art through the face-back (exterior). The remaining stack separation
-// is handled by a world-space translateZ applied BEFORE the rotation.
-const FOLD_MAX = 175;
+// Fold short of 180° so the flaps tilt forward into +Z. At/near 180° the
+// flap is coplanar with the anchor, which (a) hides the visible 3D angle,
+// (b) lets sub-pixel GPU jitter leak the face-front (interior) art through
+// the face-back (exterior), AND (c) for tri-fold C-fold lets the outer
+// wrap intersect the inner tuck panel because both flaps land in nearly
+// the same plane. Capping at 165° keeps the mailer visibly closed without
+// any panel-on-panel clipping. The world-space translateZ stack offset
+// applied BEFORE the rotation handles the remaining separation.
+const FOLD_MAX = 165;
 
 // ---------------------------------------------------------------------
 // Crease helpers — return fold positions and panel boundaries along the
@@ -298,6 +301,11 @@ function clipLineToXRange(line, x0, x1) {
 const AnnotationPin = ({ ann, isActive, isEditing, adminMode, onClick, onUpdate, onDelete, onCloseEdit, counterRotation = '' }) => {
   const stopAll = (e) => { e.stopPropagation(); };
   const wrapRef = useRef(null);
+  // Hover state — opens the read-only popup without requiring a click.
+  // Hover + click both surface the popup; click flips persistent `isActive`
+  // so the popup stays put while the user reads it.
+  const [hovered, setHovered] = useState(false);
+  const showPopup = (hovered || isActive) && !isEditing;
   // 'right' (default) or 'left' — flipped when the popup would clip the
   // right edge of the viewport. Recomputed every time the popup opens
   // (and on resize while open) so 3D rotations don't strand the box
@@ -308,13 +316,13 @@ const AnnotationPin = ({ ann, isActive, isEditing, adminMode, onClick, onUpdate,
   // before paint the user sees a one-frame flash at the wrong side when
   // opening a popup near the viewport edge.
   useLayoutEffect(() => {
-    if (!isActive && !isEditing) return;
+    if (!showPopup && !isEditing) return;
     const recalc = () => {
       const el = wrapRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
-      const POPUP_W = 280;
-      const GAP = 28;
+      const POPUP_W = 340;
+      const GAP = 36;
       const SAFE = 12;
       const fitsRight = rect.left + GAP + POPUP_W + SAFE <= window.innerWidth;
       const fitsLeft  = rect.left - GAP - POPUP_W - SAFE >= 0;
@@ -324,7 +332,7 @@ const AnnotationPin = ({ ann, isActive, isEditing, adminMode, onClick, onUpdate,
     recalc();
     window.addEventListener('resize', recalc);
     return () => window.removeEventListener('resize', recalc);
-  }, [isActive, isEditing]);
+  }, [showPopup, isEditing]);
   // Counter the panel's fold / face-back rotation so pin + text always
   // read upright. Keeps the contents in their own 3D plane so they don't
   // squash into the panel's surface.
@@ -334,19 +342,23 @@ const AnnotationPin = ({ ann, isActive, isEditing, adminMode, onClick, onUpdate,
   return (
     <div
       ref={wrapRef}
-      className={`ann-pin-wrap ${ann.isNeed ? 'need' : ''} ${isActive ? 'active' : ''} popup-x-${popupX}`}
+      className={`ann-pin-wrap ${ann.isNeed ? 'need' : ''} ${(isActive || hovered) ? 'active' : ''} popup-x-${popupX}`}
       style={{ left: `${ann.x * 100}%`, top: `${ann.y * 100}%`, transformStyle: 'preserve-3d' }}
       onClick={onClick}
       onPointerDown={stopAll}
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
     >
       <div className="ann-pin-inner" style={innerStyle}>
       <div className="ann-pin">
-        {ann.isNeed ? '!' : ''}
+        {ann.isNeed ? '!' : 'i'}
       </div>
-      {isActive && !isEditing && (
+      {showPopup && (
         <div className="ann-popup">
           {ann.isNeed && <div className="ann-popup-flag">NEED</div>}
-          <div className="ann-popup-body">{ann.content || (adminMode ? '(empty — click to edit)' : '')}</div>
+          {ann.content
+            ? <div className="ann-popup-body">{ann.content}</div>
+            : <div className="ann-popup-body ann-popup-empty">{adminMode ? 'Empty — click to edit' : ''}</div>}
         </div>
       )}
       {isEditing && adminMode && (
@@ -389,6 +401,7 @@ function toggleSideRotate180(current) {
 const MailerViewer = ({
   config, setConfig, pages, onOpenEditor,
   adminMode, onToggleAdmin, onShareLink, onSetDefaultCamera, onAddAnnotation, onUpdateAnnotation, onDeleteAnnotation,
+  onZoomChange,
 }) => {
   const geo = useMemo(() => computeGeometry(config), [config]);
   const { sheetW, sheetH, panels, vertical } = geo;
@@ -410,6 +423,9 @@ const MailerViewer = ({
   const [activeAnnotation, setActiveAnnotation] = useState(null); // id of opened popup
   const [editingAnnotation, setEditingAnnotation] = useState(null); // id being edited in admin
   const [shareToast, setShareToast] = useState(null);
+  // Share modal: { link, kind: 'short'|'legacy', copied: bool, error?: string, loading?: bool }
+  const [shareModal, setShareModal] = useState(null);
+  const shareInputRef = useRef(null);
 
   const dragRef = useRef(null);
   const viewportRef = useRef(null);
@@ -673,28 +689,38 @@ const MailerViewer = ({
                 panelOrient={outsidePanelOrient}
               />
             )}
-            {(config.annotations || []).filter(a => a.panelIdx === i && a.side === 'outside').map(ann => (
-              <AnnotationPin
-                key={ann.id}
-                ann={ann}
-                isActive={activeAnnotation === ann.id || editingAnnotation === ann.id}
-                isEditing={editingAnnotation === ann.id}
-                adminMode={adminMode}
-                onClick={(e) => handleAnnotationClick(ann, e)}
-                onUpdate={(patch) => onUpdateAnnotation?.(ann.id, patch)}
-                onDelete={() => { onDeleteAnnotation?.(ann.id); setEditingAnnotation(null); }}
-                onCloseEdit={() => setEditingAnnotation(null)}
-                counterRotation={
-                  // The face-back already has a CSS rotateX(180) (or rotateY(180) for horizontal)
-                  // baked in, plus the panel's fold angle. Counter both so text stays upright.
-                  // Vertical uses negated angle in the hinge transform, so its counter
-                  // is the positive angle to invert.
-                  vertical
-                    ? `rotateX(${angle}deg) rotateX(-180deg)`
-                    : `rotateY(180deg) rotateY(${-angle}deg)`
-                }
-              />
-            ))}
+            {(config.annotations || []).filter(a => a.panelIdx === i && a.side === 'outside').map(ann => {
+              // face-back is rendered with rotateX(180deg) (vertical fold)
+              // or rotateY(180deg) (horizontal fold), which visually flips
+              // child element coordinates along the rotation axis. We
+              // mirror the pin's stored coords to match where the admin
+              // placed it on the unflipped editor view.
+              const displayAnn = vertical
+                ? { ...ann, y: 1 - ann.y }
+                : { ...ann, x: 1 - ann.x };
+              return (
+                <AnnotationPin
+                  key={ann.id}
+                  ann={displayAnn}
+                  isActive={activeAnnotation === ann.id || editingAnnotation === ann.id}
+                  isEditing={editingAnnotation === ann.id}
+                  adminMode={adminMode}
+                  onClick={(e) => handleAnnotationClick(ann, e)}
+                  onUpdate={(patch) => onUpdateAnnotation?.(ann.id, patch)}
+                  onDelete={() => { onDeleteAnnotation?.(ann.id); setEditingAnnotation(null); }}
+                  onCloseEdit={() => setEditingAnnotation(null)}
+                  counterRotation={
+                    // The face-back already has a CSS rotateX(180) (or rotateY(180) for horizontal)
+                    // baked in, plus the panel's fold angle. Counter both so text stays upright.
+                    // Vertical uses negated angle in the hinge transform, so its counter
+                    // is the positive angle to invert.
+                    vertical
+                      ? `rotateX(${angle}deg) rotateX(-180deg)`
+                      : `rotateY(180deg) rotateY(${-angle}deg)`
+                  }
+                />
+              );
+            })}
           </div>
           {torn && isTearPanel && <div className={`torn-edge ${vertical ? (offsetFromAnchor < 0 ? 'bottom' : 'top') : (offsetFromAnchor < 0 ? 'right' : 'left')}`} />}
         </div>
@@ -720,12 +746,18 @@ const MailerViewer = ({
     );
   };
 
-  // Mouse-wheel zoom on the viewport
+  // Mouse-wheel zoom on the viewport. Cap raised to 8× now that the PDF
+  // re-renders at higher resolution when zoomed in.
   const onWheel = (e) => {
     if (e.target?.closest?.('.no-orbit, .controls, .editor-overlay')) return;
     e.preventDefault();
-    setUserZoom(z => clamp(z * Math.exp(-e.deltaY * 0.0015), 0.25, 6));
+    setUserZoom(z => clamp(z * Math.exp(-e.deltaY * 0.0015), 0.25, 8));
   };
+
+  // Report zoom level upward so the app can bump PDF render resolution.
+  useEffect(() => {
+    onZoomChange?.(userZoom);
+  }, [userZoom, onZoomChange]);
 
   const effectiveScale = clamp(scale * userZoom, 0.05, 10);
 
@@ -776,8 +808,17 @@ const MailerViewer = ({
 
       {/* HUD */}
       <div className="hud">
-        <div className="hud-title">Mailer Preview</div>
-        <div className="hud-name">{config.pdfName}</div>
+        <div className="hud-brand">
+          <img className="hud-logo" src="/white-stacked.png" alt="Fog Signal Strategies" />
+          <div className="hud-brand-text">
+            <div className="hud-brand-name">Fog Signal Strategies</div>
+            <div className="hud-brand-tag">Mailer Preview</div>
+          </div>
+        </div>
+        <div className="hud-name">{config.pdfTitle || config.pdfName}</div>
+        {config.pdfDescription && (
+          <div className="hud-description">{config.pdfDescription}</div>
+        )}
         <div className="hud-sub">
           {config.numPanels}-panel {config.foldType.toUpperCase()} ·
           {' '}{vertical ? 'vertical' : 'horizontal'} · drag to orbit
@@ -818,14 +859,25 @@ const MailerViewer = ({
           </button>
         )}
         {adminMode && (
-          <button className="ctrl-btn" onClick={() => {
-            const link = onShareLink?.();
-            if (link) {
-              navigator.clipboard?.writeText(link).then(
-                () => setShareToast('Link copied to clipboard'),
-                () => setShareToast('Copy failed — link in console'),
-              );
-              setTimeout(() => setShareToast(null), 2400);
+          <button className="ctrl-btn" onClick={async () => {
+            setShareModal({ loading: true });
+            try {
+              const result = await onShareLink?.();
+              if (!result) { setShareModal(null); return; }
+              const { link, kind, error } = result;
+              // Best-effort clipboard write. Falls back to a visible input
+              // the user can copy from manually (non-HTTPS contexts have
+              // no clipboard API at all).
+              let copied = false;
+              try {
+                if (navigator.clipboard?.writeText) {
+                  await navigator.clipboard.writeText(link);
+                  copied = true;
+                }
+              } catch {}
+              setShareModal({ link, kind, error, copied });
+            } catch (e) {
+              setShareModal({ link: '', kind: 'error', error: e.message });
             }
           }}>Share link</button>
         )}
@@ -843,6 +895,73 @@ const MailerViewer = ({
       </div>
       {shareToast && (
         <div className="share-toast">{shareToast}</div>
+      )}
+
+      {shareModal && (
+        <div className="share-modal-backdrop no-orbit"
+             onClick={() => setShareModal(null)}
+             onPointerDown={(e) => e.stopPropagation()}>
+          <div className="share-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="share-modal-title">Share this mailer</div>
+            {shareModal.loading && (
+              <div className="share-modal-body">Creating link…</div>
+            )}
+            {!shareModal.loading && shareModal.link && (
+              <>
+                <div className="share-modal-sub">
+                  {shareModal.kind === 'short'
+                    ? 'Anyone with this link opens the viewer in client view.'
+                    : 'Server share not available — using a legacy hash link. Long, but works the same.'}
+                </div>
+                <div className="share-modal-row">
+                  <input
+                    ref={shareInputRef}
+                    className="share-modal-input"
+                    type="text"
+                    readOnly
+                    value={shareModal.link}
+                    onFocus={(e) => e.target.select()}
+                    onClick={(e) => e.target.select()}
+                  />
+                  <button
+                    className="ctrl-btn primary"
+                    onClick={async () => {
+                      let ok = false;
+                      try {
+                        if (navigator.clipboard?.writeText) {
+                          await navigator.clipboard.writeText(shareModal.link);
+                          ok = true;
+                        }
+                      } catch {}
+                      if (!ok) {
+                        // execCommand fallback for non-HTTPS contexts.
+                        const el = shareInputRef.current;
+                        if (el) { el.focus(); el.select(); try { ok = document.execCommand('copy'); } catch {} }
+                      }
+                      setShareModal(m => m ? { ...m, copied: ok, copyError: !ok } : m);
+                    }}
+                  >
+                    {shareModal.copied ? 'Copied ✓' : 'Copy'}
+                  </button>
+                </div>
+                {shareModal.copyError && (
+                  <div className="share-modal-warn">
+                    Couldn't copy automatically — select the text above and copy manually.
+                  </div>
+                )}
+                {shareModal.error && shareModal.kind !== 'short' && (
+                  <div className="share-modal-warn">Note: {shareModal.error}</div>
+                )}
+              </>
+            )}
+            {!shareModal.loading && shareModal.kind === 'error' && (
+              <div className="share-modal-warn">Couldn't create link: {shareModal.error}</div>
+            )}
+            <div className="share-modal-actions">
+              <button className="ctrl-btn" onClick={() => setShareModal(null)}>Close</button>
+            </div>
+          </div>
+        </div>
       )}
 
       <div className="stage-tag">
@@ -893,7 +1012,7 @@ const MailerViewer = ({
 
         <button className="ctrl-btn" onClick={() => setUserZoom(z => Math.max(0.25, z / 1.2))} title="Zoom out">−</button>
         <span className="zoom-readout">{Math.round(userZoom * 100)}%</span>
-        <button className="ctrl-btn" onClick={() => setUserZoom(z => Math.min(6, z * 1.2))} title="Zoom in">+</button>
+        <button className="ctrl-btn" onClick={() => setUserZoom(z => Math.min(8, z * 1.2))} title="Zoom in">+</button>
         <button className="ctrl-btn" onClick={() => setUserZoom(1)} title="Reset zoom">100%</button>
 
         {adminMode && (

@@ -7,9 +7,23 @@
 
 const { useState, useRef, useEffect, useCallback } = React;
 
-const SAMPLE_PDF_URL = 'uploads/Listening_FSS_CSSD_Tier3_1_1c.pdf';
+const SAMPLE_PDF_URL = '/uploads/Listening_FSS_CSSD_Tier3_1_1c.pdf';
 const STORAGE_KEY = 'mailerViewerConfig_v1';
 const TOKEN_STORAGE_KEY = 'mailerAdminToken_v1';
+// Per-PDF title/description map: { [pdfUrl]: { title, description } }.
+// Kept separate from the main config so switching PDFs restores the right
+// human-friendly strings instead of carrying them across mailers.
+const META_STORAGE_KEY = 'mailerMetaByUrl_v1';
+
+function loadMetaMap() {
+  try {
+    const raw = localStorage.getItem(META_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) || {}) : {};
+  } catch { return {}; }
+}
+function saveMetaMap(m) {
+  try { localStorage.setItem(META_STORAGE_KEY, JSON.stringify(m)); } catch {}
+}
 
 const DEFAULT_CONFIG = {
   // PDF sources, in priority order:
@@ -22,6 +36,11 @@ const DEFAULT_CONFIG = {
   pdfUrl: null,
   pdfDataUrl: null,
   pdfName: 'D11 Learning By Listening',
+  // Admin-editable display strings shown to clients in the share view.
+  // pdfName is derived from the filename; pdfTitle/pdfDescription are the
+  // human-friendly overrides that travel with the share link.
+  pdfTitle: '',
+  pdfDescription: '',
   // Geometry
   foldType: 'cfold',         // cfold | zfold | half | gate | quarter
   numPanels: 3,              // 2 | 3 | 4
@@ -67,7 +86,9 @@ const DEFAULT_CONFIG = {
   showCreases: true,
   background: 'studio',
   // PDF.js render scale — higher = sharper artwork but slower load and more memory.
-  renderScale: 0.6,
+  // 1.0 ("HD") is a comfortable default for reading text at moderate zoom;
+  // the app auto-bumps this further when the user zooms in.
+  renderScale: 1.0,
   // Annotations placed on the mailer. Each: {id, panelIdx, x, y, content, isNeed}
   annotations: [],
   // Camera angle the viewer opens with. null = built-in front view.
@@ -75,7 +96,9 @@ const DEFAULT_CONFIG = {
   defaultCamera: null,
 };
 
-// Decode a shared config from the URL hash. Returns null if absent/invalid.
+// Decode a legacy (hash-based) shared config. Returns null if absent/invalid.
+// Kept for backwards compatibility with links sent before short-link support
+// was added; new links use /s/<id> via the server.
 function decodeSharedConfig() {
   if (typeof location === 'undefined' || !location.hash) return null;
   const m = location.hash.match(/(?:^|[#&])c=([^&]+)/);
@@ -89,9 +112,24 @@ function decodeSharedConfig() {
   }
 }
 
+// Extract a short share id from the current URL.
+// Supported forms:
+//   /s/<id>      — preferred, clean path
+//   /share/<id>  — friendlier alias
+//   ?s=<id>      — query fallback (when proxies rewrite paths)
+function extractShareId() {
+  if (typeof location === 'undefined') return null;
+  const p = location.pathname || '';
+  let m = p.match(/^\/(?:s|share)\/([a-z0-9]{6,32})\/?$/i);
+  if (m) return m[1].toLowerCase();
+  m = (location.search || '').match(/[?&]s=([a-z0-9]{6,32})\b/i);
+  if (m) return m[1].toLowerCase();
+  return null;
+}
+
 function loadConfig() {
-  // A share-link config takes precedence over localStorage so recipients
-  // see exactly the configuration the sender intended.
+  // A legacy hash share-link still wins over localStorage so old links work.
+  // Short-link configs are applied asynchronously after fetch (see App).
   const shared = decodeSharedConfig();
   if (shared) return { ...DEFAULT_CONFIG, ...shared, pdfDataUrl: null };
   try {
@@ -108,10 +146,9 @@ function loadConfig() {
   }
 }
 
-function buildShareLink(config) {
-  // pdfDataUrl is intentionally stripped — it can be multi-MB and won't
-  // fit in a URL. pdfUrl (server-hosted) IS kept so recipients fetch
-  // the right PDF from /uploads/...
+// Build a legacy hash-style share link. Used only as a fallback when the
+// server's POST /api/shares is unreachable (e.g. static-only deploys).
+function buildLegacyShareLink(config) {
   const { pdfDataUrl, ...slim } = config;
   const encoded = encodeURIComponent(btoa(JSON.stringify(slim)));
   const base = location.origin + location.pathname;
@@ -171,6 +208,27 @@ function makeLibraryClient(getToken) {
         throw new Error(msg.error || ('delete ' + res.status));
       }
       return res.json();
+    },
+    async createShare(config) {
+      const { pdfDataUrl, ...slim } = config; // never send the data URL
+      const res = await fetch('/api/shares', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ config: slim }),
+      });
+      if (!res.ok) {
+        const msg = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(msg.error || ('share ' + res.status));
+      }
+      return res.json(); // { id, url }
+    },
+    async fetchShare(id) {
+      const res = await fetch(`/api/shares/${encodeURIComponent(id)}`);
+      if (!res.ok) {
+        const msg = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(msg.error || ('fetch share ' + res.status));
+      }
+      return res.json(); // { created, config }
     },
   };
 }
@@ -312,10 +370,18 @@ const App = () => {
   const [loadStatus, setLoadStatus] = useState('loading');
   const [loadErr, setLoadErr] = useState(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  // Live user-zoom from the viewer. Drives dynamic PDF re-rendering at
+  // higher resolution so text stays crisp when the user zooms in.
+  const [viewerZoom, setViewerZoom] = useState(1);
   // Admin mode: true when in editing-capable mode. Hidden when client view.
   // Defaults to admin if no share link was supplied, otherwise starts in
   // client view so recipients see a clean preview.
-  const [adminMode, setAdminMode] = useState(() => !decodeSharedConfig());
+  // Initial share id from the URL (set once, never re-read). Both a legacy
+  // hash share and a short-link id flip us into client view.
+  const initialShareId = useRef(extractShareId()).current;
+  const [adminMode, setAdminMode] = useState(
+    () => !decodeSharedConfig() && !initialShareId
+  );
   // Tracks the PDF source we last completed a render for. Used so the
   // "adopt PDF intrinsic page dims" step fires only on a genuine source
   // change (upload/drop), not on every re-render (e.g., resolution change).
@@ -376,11 +442,14 @@ const App = () => {
   const uploadFile = useCallback(async (file) => {
     const item = await lib.upload(file);
     await refreshLibrary();
+    const saved = loadMetaMap()[item.url] || {};
     setConfig(c => ({
       ...c,
       pdfUrl: item.url,
       pdfDataUrl: null,
       pdfName: item.name,
+      pdfTitle: saved.title || '',
+      pdfDescription: saved.description || '',
       perforations: [],
     }));
     return item;
@@ -388,11 +457,14 @@ const App = () => {
 
   const selectFromLibrary = useCallback((item) => {
     if (!item || !item.url) return;
+    const saved = loadMetaMap()[item.url] || {};
     setConfig(c => ({
       ...c,
       pdfUrl: item.url,
       pdfDataUrl: null,
       pdfName: item.name,
+      pdfTitle: saved.title || '',
+      pdfDescription: saved.description || '',
       perforations: [],
     }));
   }, []);
@@ -419,36 +491,115 @@ const App = () => {
   const handleDeleteAnnotation = useCallback((id) => {
     setConfig(c => ({ ...c, annotations: (c.annotations || []).filter(a => a.id !== id) }));
   }, []);
-  const handleShareLink = useCallback(() => {
-    const link = buildShareLink(config);
-    console.log('[Share link]', link);
-    return link;
-  }, [config]);
+  // Mint a share link. Tries the server first (short, persistent URL); on
+  // failure falls back to the legacy hash form so the share button never
+  // looks broken even if the server endpoint is down.
+  const handleShareLink = useCallback(async () => {
+    try {
+      const { id, url } = await lib.createShare(config);
+      const link = location.origin + url;
+      console.log('[Share link]', link);
+      return { link, kind: 'short', id };
+    } catch (e) {
+      console.warn('Short share failed, falling back to hash link:', e);
+      const link = buildLegacyShareLink(config);
+      return { link, kind: 'legacy', error: e.message };
+    }
+  }, [config, lib]);
   const handleSetDefaultCamera = useCallback((cam) => {
     setConfig(c => ({ ...c, defaultCamera: cam ? { x: cam.x, y: cam.y } : null }));
   }, []);
 
-  // Save config whenever it changes
-  useEffect(() => { saveConfig(config); }, [config]);
+  // If the URL points at a short share (/s/<id>), fetch the stored config
+  // and overlay it on top of defaults. Done once on mount.
+  const [shareError, setShareError] = useState(null);
+  useEffect(() => {
+    if (!initialShareId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { config: shared } = await lib.fetchShare(initialShareId);
+        if (cancelled || !shared) return;
+        setConfig(c => ({ ...DEFAULT_CONFIG, ...shared, pdfDataUrl: null }));
+      } catch (e) {
+        if (!cancelled) setShareError(e.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [initialShareId, lib]);
+
+  // Save config whenever it changes — but don't persist while we're
+  // displaying someone else's share (it would clobber the recipient's
+  // own saved settings).
+  useEffect(() => {
+    if (initialShareId || decodeSharedConfig()) return;
+    saveConfig(config);
+  }, [config, initialShareId]);
+
+  // Per-PDF meta (title + description) writer. Stored separately from the
+  // main config so that switching mailers restores each one's own strings.
+  // Recipients don't write (their pdfUrl belongs to the sender's library).
+  useEffect(() => {
+    if (initialShareId || decodeSharedConfig()) return;
+    if (!config.pdfUrl) return;
+    const map = loadMetaMap();
+    const cur = map[config.pdfUrl] || {};
+    const next = {
+      title: config.pdfTitle || '',
+      description: config.pdfDescription || '',
+    };
+    if (cur.title === next.title && cur.description === next.description) return;
+    // Drop entries that are entirely empty so the map doesn't grow forever.
+    if (!next.title && !next.description) {
+      if (!(config.pdfUrl in map)) return;
+      delete map[config.pdfUrl];
+    } else {
+      map[config.pdfUrl] = next;
+    }
+    saveMetaMap(map);
+  }, [config.pdfUrl, config.pdfTitle, config.pdfDescription, initialShareId]);
+
+  // Effective render scale = max of user setting and "what the current zoom
+  // demands". Debounced so a quick scroll-wheel zoom doesn't kick off
+  // multiple re-renders.
+  const [effectiveRenderScale, setEffectiveRenderScale] = useState(
+    () => Math.max(config.renderScale || 1.0, 1.0)
+  );
+  useEffect(() => {
+    const base = Math.max(0.3, Math.min(3, config.renderScale || 1.0));
+    // Each unit of CSS zoom needs ~1 unit of source-pixel density to stay
+    // sharp. We cap at 2.5× since pdf.js memory/CPU climbs quickly past
+    // that and panels rarely need more than printed-page detail.
+    const need = Math.min(2.5, Math.max(base, viewerZoom * 0.95));
+    // Quantize so we don't re-render for every tiny zoom change.
+    const quantized = Math.round(need * 4) / 4;
+    const id = setTimeout(() => setEffectiveRenderScale(quantized), 250);
+    return () => clearTimeout(id);
+  }, [config.renderScale, viewerZoom]);
 
   // Load PDF whenever pdfUrl / pdfDataUrl or render resolution changes
   useEffect(() => {
     let cancelled = false;
-    setLoadStatus('loading');
-    setLoadErr(null);
-    setPages(null);
     // Priority: server URL → local data URL → bundled sample.
     const src = config.pdfUrl
       ? config.pdfUrl
       : config.pdfDataUrl
         ? convertDataUrl(config.pdfDataUrl)
         : SAMPLE_PDF_URL;
-    const scale = Math.max(0.3, Math.min(3, config.renderScale || 0.6));
+    const scale = effectiveRenderScale;
     // Identity of the PDF being loaded. Lets us distinguish a real source
     // change (upload/drop) from a re-render at a new resolution.
     const sourceId = config.pdfUrl || config.pdfDataUrl || '@sample';
     const wasFirstLoad = lastLoadedSourceRef.current === undefined;
     const sourceChanged = lastLoadedSourceRef.current !== sourceId;
+    // Only show the full-screen loading overlay on a real source change.
+    // Resolution-only re-renders happen quietly in the background so the
+    // existing artwork stays visible while the higher-res pages load.
+    if (sourceChanged) {
+      setLoadStatus('loading');
+      setLoadErr(null);
+      setPages(null);
+    }
     renderPdfToCanvases(src, scale, () => cancelled)
       .then(({ canvases, pdfWidthIn, pdfHeightIn }) => {
         if (cancelled) return;
@@ -481,7 +632,7 @@ const App = () => {
         setLoadStatus('error');
       });
     return () => { cancelled = true; };
-  }, [config.pdfUrl, config.pdfDataUrl, config.renderScale]);
+  }, [config.pdfUrl, config.pdfDataUrl, effectiveRenderScale]);
 
   // Drag-drop handler. When the server is available we upload the file
   // straight into the library (so it's instantly sharable); otherwise we
@@ -523,6 +674,7 @@ const App = () => {
         onAddAnnotation={handleAddAnnotation}
         onUpdateAnnotation={handleUpdateAnnotation}
         onDeleteAnnotation={handleDeleteAnnotation}
+        onZoomChange={setViewerZoom}
       />
       {adminMode && (
         <window.MailerEditor

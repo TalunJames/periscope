@@ -22,13 +22,21 @@ const compression = require('compression');
 const PORT = parseInt(process.env.PORT || '80', 10);
 const STATIC_DIR = path.join(__dirname, 'public');
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || '/data/uploads');
+// Shares (short links): each is a JSON file `<id>.json` holding the saved
+// viewer config. Defaults to a sibling dir of UPLOAD_DIR so it ends up on
+// the same persistent volume.
+const SHARES_DIR = path.resolve(
+  process.env.SHARES_DIR || path.join(path.dirname(UPLOAD_DIR), 'shares')
+);
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const MAX_UPLOAD_MB = parseInt(process.env.MAX_UPLOAD_MB || '75', 10);
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+const MAX_SHARE_BYTES = 256 * 1024; // generous: configs with many annotations
 
 // Filename used for the bundled sample so it shows up in the library too.
 // Anything dropped into UPLOAD_DIR ahead of time appears automatically.
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+fs.mkdirSync(SHARES_DIR, { recursive: true });
 
 const SAMPLE_SRC = path.join(__dirname, 'seed-uploads');
 if (fs.existsSync(SAMPLE_SRC)) {
@@ -76,6 +84,14 @@ function requireAdmin(req, res, next) {
 // in DELETE /api/uploads/:filename.
 const SAFE_FILENAME = /^[A-Za-z0-9._-]+\.pdf$/;
 
+// Share IDs are URL-safe base32-ish — short, no ambiguous chars.
+const SAFE_SHARE_ID = /^[a-z0-9]{6,32}$/;
+function makeShareId() {
+  // 8 bytes → 16 hex chars; trim to 10 for shorter URLs while keeping
+  // 40 bits of entropy (~1e12 IDs, ample for human-scale share volumes).
+  return crypto.randomBytes(8).toString('hex').slice(0, 10);
+}
+
 // ---------- multer ----------
 
 const storage = multer.diskStorage({
@@ -102,6 +118,9 @@ const upload = multer({
 const app = express();
 app.disable('x-powered-by');
 app.use(compression());
+// JSON body parser scoped to /api/shares — keeps the existing /api/uploads
+// (multipart) untouched.
+app.use('/api/shares', express.json({ limit: MAX_SHARE_BYTES }));
 
 // Health
 app.get('/healthz', (req, res) => res.type('text/plain').send('ok\n'));
@@ -162,6 +181,74 @@ app.delete('/api/uploads/:filename', requireAdmin, async (req, res) => {
   }
 });
 
+// ---------- shares ----------
+// Create a share: stores the given viewer config under a random short id
+// and returns the id + a relative URL. Auth-gated like uploads — only the
+// admin should be minting share links.
+app.post('/api/shares', requireAdmin, async (req, res) => {
+  try {
+    const config = req.body && req.body.config;
+    if (!config || typeof config !== 'object') {
+      return res.status(400).json({ error: 'Missing config' });
+    }
+    // Strip any pdfDataUrl that snuck in — share recipients fetch from
+    // pdfUrl or the bundled sample; data URLs would blow up the file.
+    const slim = { ...config };
+    delete slim.pdfDataUrl;
+    const payload = JSON.stringify({
+      created: Date.now(),
+      config: slim,
+    });
+    if (Buffer.byteLength(payload, 'utf8') > MAX_SHARE_BYTES) {
+      return res.status(413).json({ error: 'Share payload too large' });
+    }
+    // Try a few IDs in the unlikely event of collision.
+    let id, full;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      id = makeShareId();
+      full = path.join(SHARES_DIR, `${id}.json`);
+      try {
+        await fsp.writeFile(full, payload, { flag: 'wx' });
+        break;
+      } catch (e) {
+        if (e.code !== 'EEXIST') throw e;
+        id = null;
+      }
+    }
+    if (!id) return res.status(500).json({ error: 'Could not allocate share id' });
+    res.json({ id, url: `/s/${id}` });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Fetch a share by id. Public (no auth) so recipients can load.
+app.get('/api/shares/:id', async (req, res) => {
+  const id = req.params.id;
+  if (!SAFE_SHARE_ID.test(id)) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const raw = await fsp.readFile(path.join(SHARES_DIR, `${id}.json`), 'utf8');
+    const parsed = JSON.parse(raw);
+    res.json(parsed);
+  } catch (e) {
+    if (e.code === 'ENOENT') return res.status(404).json({ error: 'Not found' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete a share — admin only. Lets the operator revoke a link.
+app.delete('/api/shares/:id', requireAdmin, async (req, res) => {
+  const id = req.params.id;
+  if (!SAFE_SHARE_ID.test(id)) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    await fsp.unlink(path.join(SHARES_DIR, `${id}.json`));
+    res.json({ ok: true });
+  } catch (e) {
+    if (e.code === 'ENOENT') return res.status(404).json({ error: 'Not found' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Serve PDFs from the library. We deliberately do NOT use express.static
 // here so that filename traversal is impossible and so we can set the
 // right Content-Type explicitly.
@@ -210,6 +297,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`mailer-viewer listening on :${PORT}`);
   console.log(`  upload dir: ${UPLOAD_DIR}`);
+  console.log(`  shares dir: ${SHARES_DIR}`);
   console.log(`  admin key:  ${ADMIN_KEY ? 'required' : 'OPEN (no key set)'}`);
   console.log(`  max upload: ${MAX_UPLOAD_MB}MB`);
 });

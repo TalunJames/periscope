@@ -8,6 +8,11 @@
 node_modules/
 npm-debug.log*
 
+# Local-dev mirror of the static app (Dockerfile builds this into the image)
+public/
+# Local share/upload data when running outside the container
+data/
+
 # Local environment overrides
 .env
 .env.local

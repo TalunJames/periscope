@@ -23,6 +23,7 @@ COPY server.js ./
 # its filename, so the JSON-array (exec) form of COPY is required.
 RUN mkdir -p /app/public /app/seed-uploads /data/uploads
 COPY app.jsx editor.jsx viewer.jsx styles.css /app/public/
+COPY blue-stacked.png white-stacked.png /app/public/
 COPY ["Mailer Viewer.html", "/app/public/index.html"]
 
 # The bundled sample PDF gets seeded into the upload volume on first run
