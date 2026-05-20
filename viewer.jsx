@@ -295,93 +295,144 @@ function clipLineToXRange(line, x0, x1) {
 }
 
 // ---------------------------------------------------------------------
-// AnnotationPin — pin marker on a panel face. Hover/click shows popup.
-// Admin mode allows editing content + Need flag + delete.
+// PinAnchor — invisible 3D-positioned marker for an annotation. Lives
+// inside the panel face so the browser computes its on-screen position
+// every frame as the mailer folds/orbits/zooms. The PinOverlay reads
+// its bounding rect to render the visible pin in screen space.
 // ---------------------------------------------------------------------
-const AnnotationPin = ({ ann, isActive, isEditing, adminMode, onClick, onUpdate, onDelete, onCloseEdit, counterRotation = '' }) => {
-  const stopAll = (e) => { e.stopPropagation(); };
-  const wrapRef = useRef(null);
-  // Hover state — opens the read-only popup without requiring a click.
-  // Hover + click both surface the popup; click flips persistent `isActive`
-  // so the popup stays put while the user reads it.
-  const [hovered, setHovered] = useState(false);
-  const showPopup = (hovered || isActive) && !isEditing;
-  // 'right' (default) or 'left' — flipped when the popup would clip the
-  // right edge of the viewport. Recomputed every time the popup opens
-  // (and on resize while open) so 3D rotations don't strand the box
-  // off-screen on whatever side the pin happens to be on.
-  const [popupX, setPopupX] = useState('right');
-  // useLayoutEffect (not useEffect): the popup mounts on the next render
-  // with the previous popupX value, so without a synchronous re-position
-  // before paint the user sees a one-frame flash at the wrong side when
-  // opening a popup near the viewport edge.
-  useLayoutEffect(() => {
-    if (!showPopup && !isEditing) return;
-    const recalc = () => {
-      const el = wrapRef.current;
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
-      const POPUP_W = 340;
-      const GAP = 36;
-      const SAFE = 12;
-      const fitsRight = rect.left + GAP + POPUP_W + SAFE <= window.innerWidth;
-      const fitsLeft  = rect.left - GAP - POPUP_W - SAFE >= 0;
-      // Prefer right unless it overflows AND left has room.
-      setPopupX(!fitsRight && fitsLeft ? 'left' : 'right');
+const PinAnchor = ({ id, x, y }) => (
+  <div
+    data-pin-anchor={id}
+    style={{
+      position: 'absolute',
+      left: `${x * 100}%`,
+      top: `${y * 100}%`,
+      width: 0,
+      height: 0,
+      pointerEvents: 'none',
+    }}
+  />
+);
+
+// ---------------------------------------------------------------------
+// PinOverlay — renders all annotation pins + popups in a screen-space
+// layer outside the 3D-scaled scene. Each frame, it polls the
+// corresponding PinAnchor's bounding rect (which the browser computes
+// after all 3D transforms) and places the visible pin at that point.
+//
+// This solves three things the in-scene pin couldn't:
+//   • The pin is always at a fixed pixel size, never shrunk by the
+//     scene-stage scale or rotated into oblivion by the fold angle.
+//   • The popup escapes the panel's overflow:hidden — it can extend
+//     anywhere on the screen.
+//   • Pins stay right-side-up no matter how the panel is flipped.
+// ---------------------------------------------------------------------
+const PinOverlay = ({
+  annotations, adminMode, viewportRef,
+  editingId, setEditingId,
+  activeId, setActiveId,
+  onUpdate, onDelete,
+}) => {
+  // id → { x, y, visible } in viewport-local coords. Updated via rAF.
+  const [positions, setPositions] = useState({});
+  // Hover state lives here now so the screen-space pin can show/hide
+  // its popup directly. Hover OR active (clicked) → popup visible.
+  const [hoveredId, setHoveredId] = useState(null);
+
+  useEffect(() => {
+    if (!annotations.length) { setPositions({}); return; }
+    let raf;
+    const tick = () => {
+      const vp = viewportRef.current;
+      if (!vp) { raf = requestAnimationFrame(tick); return; }
+      const vpRect = vp.getBoundingClientRect();
+      const next = {};
+      for (const ann of annotations) {
+        const el = vp.querySelector(`[data-pin-anchor="${ann.id}"]`);
+        // offsetParent === null when any ancestor has display:none, so this
+        // cleanly hides pins on the tucked-away C-fold panel at fold≈0.
+        if (!el || !el.offsetParent) { next[ann.id] = { visible: false }; continue; }
+        const r = el.getBoundingClientRect();
+        next[ann.id] = {
+          x: r.x + r.width / 2 - vpRect.x,
+          y: r.y + r.height / 2 - vpRect.y,
+          visible: true,
+        };
+      }
+      setPositions(next);
+      raf = requestAnimationFrame(tick);
     };
-    recalc();
-    window.addEventListener('resize', recalc);
-    return () => window.removeEventListener('resize', recalc);
-  }, [showPopup, isEditing]);
-  // Counter the panel's fold / face-back rotation so pin + text always
-  // read upright. Keeps the contents in their own 3D plane so they don't
-  // squash into the panel's surface.
-  const innerStyle = counterRotation
-    ? { transform: counterRotation, transformOrigin: 'center', transformStyle: 'preserve-3d' }
-    : undefined;
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [annotations, viewportRef]);
+
+  if (!annotations.length) return null;
+
   return (
-    <div
-      ref={wrapRef}
-      className={`ann-pin-wrap ${ann.isNeed ? 'need' : ''} ${(isActive || hovered) ? 'active' : ''} popup-x-${popupX}`}
-      style={{ left: `${ann.x * 100}%`, top: `${ann.y * 100}%`, transformStyle: 'preserve-3d' }}
-      onClick={onClick}
-      onPointerDown={stopAll}
-      onPointerEnter={() => setHovered(true)}
-      onPointerLeave={() => setHovered(false)}
-    >
-      <div className="ann-pin-inner" style={innerStyle}>
-      <div className="ann-pin">
-        {ann.isNeed ? '!' : 'i'}
-      </div>
-      {showPopup && (
-        <div className="ann-popup">
-          {ann.isNeed && <div className="ann-popup-flag">NEED</div>}
-          {ann.content
-            ? <div className="ann-popup-body">{ann.content}</div>
-            : <div className="ann-popup-body ann-popup-empty">{adminMode ? 'Empty — click to edit' : ''}</div>}
-        </div>
-      )}
-      {isEditing && adminMode && (
-        <div className="ann-edit" onClick={stopAll} onPointerDown={stopAll}>
-          <textarea
-            className="ann-textarea"
-            placeholder="What does the client need to know?"
-            value={ann.content}
-            autoFocus
-            onChange={(e) => onUpdate({ content: e.target.value })}
-          />
-          <label className="ann-need-toggle">
-            <input type="checkbox" checked={!!ann.isNeed}
-                   onChange={(e) => onUpdate({ isNeed: e.target.checked })} />
-            Flag as a Need (red)
-          </label>
-          <div className="ann-edit-actions">
-            <button className="ctrl-btn" onClick={onDelete}>Delete</button>
-            <button className="ctrl-btn primary" onClick={onCloseEdit}>Done</button>
+    <div className="pin-overlay" style={{
+      position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 40,
+    }}>
+      {annotations.map(ann => {
+        const pos = positions[ann.id];
+        if (!pos || !pos.visible) return null;
+        const isEditing = editingId === ann.id;
+        const isActive = activeId === ann.id;
+        const isHovered = hoveredId === ann.id;
+        const showPopup = (isHovered || isActive) && !isEditing;
+        // Popup width is ~340; flip to the left if it would clip.
+        const POPUP_W = 340;
+        const GAP = 18;
+        const fitsRight = pos.x + GAP + POPUP_W + 12 <= (viewportRef.current?.clientWidth ?? window.innerWidth);
+        const fitsLeft  = pos.x - GAP - POPUP_W - 12 >= 0;
+        const popupSide = !fitsRight && fitsLeft ? 'left' : 'right';
+        return (
+          <div
+            key={ann.id}
+            className={`ann-pin-wrap ${ann.isNeed ? 'need' : ''} ${(isActive || isHovered) ? 'active' : ''} popup-x-${popupSide}`}
+            style={{ position: 'absolute', left: pos.x, top: pos.y, pointerEvents: 'auto' }}
+            onPointerEnter={() => setHoveredId(ann.id)}
+            onPointerLeave={() => setHoveredId(h => h === ann.id ? null : h)}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (adminMode) setEditingId(ann.id);
+              else setActiveId(prev => prev === ann.id ? null : ann.id);
+            }}
+          >
+            <div className="ann-pin">{ann.isNeed ? '!' : 'i'}</div>
+            {showPopup && (
+              <div className="ann-popup">
+                {ann.isNeed && <div className="ann-popup-flag">NEED</div>}
+                {ann.content
+                  ? <div className="ann-popup-body">{ann.content}</div>
+                  : <div className="ann-popup-body ann-popup-empty">{adminMode ? 'Empty — click to edit' : ''}</div>}
+              </div>
+            )}
+            {isEditing && adminMode && (
+              <div className="ann-edit"
+                   onClick={(e) => e.stopPropagation()}
+                   onPointerDown={(e) => e.stopPropagation()}>
+                <textarea
+                  className="ann-textarea"
+                  placeholder="What does the client need to know?"
+                  value={ann.content}
+                  autoFocus
+                  onChange={(e) => onUpdate(ann.id, { content: e.target.value })}
+                />
+                <label className="ann-need-toggle">
+                  <input type="checkbox" checked={!!ann.isNeed}
+                         onChange={(e) => onUpdate(ann.id, { isNeed: e.target.checked })} />
+                  Flag as a Need (red)
+                </label>
+                <div className="ann-edit-actions">
+                  <button className="ctrl-btn" onClick={() => { onDelete(ann.id); setEditingId(null); }}>Delete</button>
+                  <button className="ctrl-btn primary" onClick={() => setEditingId(null)}>Done</button>
+                </div>
+              </div>
+            )}
           </div>
-        </div>
-      )}
-      </div>
+        );
+      })}
     </div>
   );
 };
@@ -418,6 +469,9 @@ const MailerViewer = ({
   const [scale, setScale] = useState(0.35);
   // User-controlled zoom multiplier on top of fit-to-viewport.
   const [userZoom, setUserZoom] = useState(1);
+  // Scene pan in screen-pixels — used to keep a point under the cursor
+  // when double-clicking to zoom in/out.
+  const [sceneOffset, setSceneOffset] = useState({ x: 0, y: 0 });
   // Annotation interaction state
   const [placingAnnotation, setPlacingAnnotation] = useState(false);
   const [activeAnnotation, setActiveAnnotation] = useState(null); // id of opened popup
@@ -564,6 +618,27 @@ const MailerViewer = ({
     // at mid-fold angles.
     const localZ = isAnchor ? 0 : stackOrder * STACK_GAP * liftRamp;
 
+    // Tucked-flap fade: at fold≈0 the inner tuck of a 3-panel C-fold sits
+    // sandwiched between the cover and the anchor — physically invisible
+    // from outside, but in CSS-3D it can still leak through the cover from
+    // sub-pixel jitter and create clipping artifacts. Fading its alpha to
+    // 0 when the mailer is fully closed eliminates the leak entirely; once
+    // the user starts to open, it ramps back in over a few percent of the
+    // slider. Other folds are unaffected.
+    //
+    // Hide the inner tuck flap of a 3-panel C-fold near full fold. The
+    // user's PDF has the cover artwork on the lower-Z (stackOrder=1)
+    // flap, and the tucked-under flap is the higher-Z one. We only need
+    // the tuck to disappear right at fold≈0 — by the time the user
+    // starts to open, it ramps back to full opacity.
+    let hingeOpacity = 1;
+    if (config.numPanels === 3 && config.foldType === 'cfold' && !isAnchor) {
+      if (stackOrder === 2) {
+        const FADE_END = 0.06; // mailer "starts to open" threshold
+        hingeOpacity = Math.min(1, fold / FADE_END);
+      }
+    }
+
     // Build hinge transform-origin: the side of the panel that is closest
     // to the anchor (so the panel pivots at the seam).
     let originStr, hingeStyle;
@@ -589,6 +664,10 @@ const MailerViewer = ({
         left: x, top: y, width: w, height: h,
         transformOrigin: originStr,
         transform: isAnchor ? '' : `translateZ(${localZ}px) rotateX(${-angle}deg)`,
+        opacity: hingeOpacity,
+        // Fully-faded panels are dropped from layout entirely so they
+        // can't contribute to depth-buffer clipping with the cover.
+        display: hingeOpacity <= 0 ? 'none' : undefined,
       };
     } else {
       if (offsetFromAnchor < 0) originStr = '100% 50%';
@@ -599,6 +678,8 @@ const MailerViewer = ({
         left: x, top: y, width: w, height: h,
         transformOrigin: originStr,
         transform: isAnchor ? '' : `translateZ(${localZ}px) rotateY(${angle}deg)`,
+        opacity: hingeOpacity,
+        display: hingeOpacity <= 0 ? 'none' : undefined,
       };
     }
 
@@ -661,18 +742,7 @@ const MailerViewer = ({
             )}
             <PerforationOverlay config={config} panel={panel} />
             {(config.annotations || []).filter(a => a.panelIdx === i && (a.side || 'inside') === 'inside').map(ann => (
-              <AnnotationPin
-                key={ann.id}
-                ann={ann}
-                isActive={activeAnnotation === ann.id || editingAnnotation === ann.id}
-                isEditing={editingAnnotation === ann.id}
-                adminMode={adminMode}
-                onClick={(e) => handleAnnotationClick(ann, e)}
-                onUpdate={(patch) => onUpdateAnnotation?.(ann.id, patch)}
-                onDelete={() => { onDeleteAnnotation?.(ann.id); setEditingAnnotation(null); }}
-                onCloseEdit={() => setEditingAnnotation(null)}
-                counterRotation={vertical ? `rotateX(${angle}deg)` : `rotateY(${-angle}deg)`}
-              />
+              <PinAnchor key={ann.id} id={ann.id} x={ann.x} y={ann.y} />
             ))}
           </div>
           <div className={`face face-back ${vertical ? 'fb-vertical' : 'fb-horizontal'}`}>
@@ -692,33 +762,15 @@ const MailerViewer = ({
             {(config.annotations || []).filter(a => a.panelIdx === i && a.side === 'outside').map(ann => {
               // face-back is rendered with rotateX(180deg) (vertical fold)
               // or rotateY(180deg) (horizontal fold), which visually flips
-              // child element coordinates along the rotation axis. We
-              // mirror the pin's stored coords to match where the admin
-              // placed it on the unflipped editor view.
-              const displayAnn = vertical
-                ? { ...ann, y: 1 - ann.y }
-                : { ...ann, x: 1 - ann.x };
+              // child element coordinates along the rotation axis. Mirror
+              // the anchor's coords so it lands where the admin placed it
+              // on the unflipped editor view. Pin rendering happens in
+              // screen-space (PinOverlay), so visual orientation is
+              // always upright regardless of fold/flip.
+              const mirroredY = vertical ? 1 - ann.y : ann.y;
+              const mirroredX = vertical ? ann.x : 1 - ann.x;
               return (
-                <AnnotationPin
-                  key={ann.id}
-                  ann={displayAnn}
-                  isActive={activeAnnotation === ann.id || editingAnnotation === ann.id}
-                  isEditing={editingAnnotation === ann.id}
-                  adminMode={adminMode}
-                  onClick={(e) => handleAnnotationClick(ann, e)}
-                  onUpdate={(patch) => onUpdateAnnotation?.(ann.id, patch)}
-                  onDelete={() => { onDeleteAnnotation?.(ann.id); setEditingAnnotation(null); }}
-                  onCloseEdit={() => setEditingAnnotation(null)}
-                  counterRotation={
-                    // The face-back already has a CSS rotateX(180) (or rotateY(180) for horizontal)
-                    // baked in, plus the panel's fold angle. Counter both so text stays upright.
-                    // Vertical uses negated angle in the hinge transform, so its counter
-                    // is the positive angle to invert.
-                    vertical
-                      ? `rotateX(${angle}deg) rotateX(-180deg)`
-                      : `rotateY(180deg) rotateY(${-angle}deg)`
-                  }
-                />
+                <PinAnchor key={ann.id} id={ann.id} x={mirroredX} y={mirroredY} />
               );
             })}
           </div>
@@ -747,11 +799,61 @@ const MailerViewer = ({
   };
 
   // Mouse-wheel zoom on the viewport. Cap raised to 8× now that the PDF
-  // re-renders at higher resolution when zoomed in.
+  // re-renders at higher resolution when zoomed in. Zoom is centered on
+  // the cursor: the world point under the cursor stays put through the
+  // zoom transition.
   const onWheel = (e) => {
     if (e.target?.closest?.('.no-orbit, .controls, .editor-overlay')) return;
     e.preventDefault();
-    setUserZoom(z => clamp(z * Math.exp(-e.deltaY * 0.0015), 0.25, 8));
+    const factor = Math.exp(-e.deltaY * 0.0015);
+    zoomAtPoint(e.clientX, e.clientY, factor);
+  };
+
+  // Apply a zoom factor with the world-point under (clientX, clientY)
+  // held fixed on screen.
+  //
+  // The scene-stage transform is `translate3d(ox, oy) scale(s)` with the
+  // default 50% 50% transformOrigin. A content point at offset (lx, ly)
+  // from the stage's *box center* lands on screen at:
+  //   screenX = boxCenterX + lx * s + ox
+  // From the current screen position cx we can back out lx = (cx − bcx − ox)/s.
+  // After zoom (s → s'), we want the same lx to project to cx again:
+  //   ox' = cx − bcx − lx * s' = dx − (dx − ox) * (s'/s)
+  // where dx = cx − bcx is the cursor offset from the stage box center.
+  // bcx, bcy are pre-transform layout values from offsetLeft/Width.
+  const zoomAtPoint = (clientX, clientY, factor) => {
+    const vp = viewportRef.current;
+    if (!vp) { setUserZoom(z => clamp(z * factor, 0.25, 8)); return; }
+    const stage = vp.querySelector('.scene-stage');
+    const vpRect = vp.getBoundingClientRect();
+    const px = clientX - vpRect.x; // cursor in viewport-local
+    const py = clientY - vpRect.y;
+    // Pre-transform layout box center, in viewport-local coords.
+    const bcx = (stage ? stage.offsetLeft + stage.offsetWidth / 2 : vpRect.width / 2);
+    const bcy = (stage ? stage.offsetTop  + stage.offsetHeight / 2 : vpRect.height / 2);
+    const dx = px - bcx;
+    const dy = py - bcy;
+    setUserZoom(oldZ => {
+      const newZ = clamp(oldZ * factor, 0.25, 8);
+      const oldScale = clamp(scale * oldZ, 0.05, 10);
+      const newScale = clamp(scale * newZ, 0.05, 10);
+      const r = newScale / oldScale;
+      setSceneOffset(o => ({
+        x: dx - (dx - o.x) * r,
+        y: dy - (dy - o.y) * r,
+      }));
+      return newZ;
+    });
+  };
+
+  // Double-click anywhere in the viewport zooms in (or back out) centered
+  // on the cursor. Skips when the click hit a control or an annotation.
+  const onDoubleClick = (e) => {
+    if (e.target?.closest?.('.no-orbit, .controls, .ann-pin-wrap, .editor-overlay')) return;
+    e.preventDefault();
+    // If currently zoomed in (≥1.5×), pop back to 1×; otherwise zoom in 2×.
+    const factor = userZoom >= 1.5 ? (1 / userZoom) : 2;
+    zoomAtPoint(e.clientX, e.clientY, factor);
   };
 
   // Report zoom level upward so the app can bump PDF render resolution.
@@ -788,9 +890,15 @@ const MailerViewer = ({
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onDoubleClick={onDoubleClick}
       onWheel={onWheel}
     >
-      <div className="scene-stage" style={{ transform: `scale(${effectiveScale})` }}>
+      <div className="scene-stage" style={{
+        // translate3d offsets the (centered) stage in screen pixels, scale
+        // pivots around the default 50% 50% origin. zoomAtPoint compensates
+        // sceneOffset so the world-point under the cursor stays put.
+        transform: `translate3d(${sceneOffset.x}px, ${sceneOffset.y}px, 0) scale(${effectiveScale})`,
+      }}>
         <div
           className={`scene ${isDragging ? 'dragging' : ''}`}
           style={{
@@ -805,6 +913,21 @@ const MailerViewer = ({
           </div>
         </div>
       </div>
+
+      {/* Screen-space annotation overlay — pins/popups rendered outside
+          the 3D scene so they stay crisp, never clip on panel edges, and
+          remain upright regardless of fold or page-orient flips. */}
+      <PinOverlay
+        annotations={config.annotations || []}
+        adminMode={adminMode}
+        viewportRef={viewportRef}
+        editingId={editingAnnotation}
+        setEditingId={setEditingAnnotation}
+        activeId={activeAnnotation}
+        setActiveId={setActiveAnnotation}
+        onUpdate={onUpdateAnnotation}
+        onDelete={onDeleteAnnotation}
+      />
 
       {/* HUD */}
       <div className="hud">
@@ -1006,14 +1129,29 @@ const MailerViewer = ({
         <button className="ctrl-btn" onClick={() => {
           setCamera(config.defaultCamera ? { ...config.defaultCamera } : { ...DEFAULT_CAMERA });
           setFold(0); setTear(0); setTearOffset({x:0,y:0,rot:0});
+          setUserZoom(1); setSceneOffset({ x: 0, y: 0 });
         }}>Reset</button>
 
         <div className="ctrl-divider" />
 
-        <button className="ctrl-btn" onClick={() => setUserZoom(z => Math.max(0.25, z / 1.2))} title="Zoom out">−</button>
+        <button className="ctrl-btn" onClick={() => {
+          // Zoom centered on the viewport — keeps the focal point stable
+          // when using the buttons rather than the wheel/double-click.
+          const vp = viewportRef.current;
+          if (!vp) { setUserZoom(z => Math.max(0.25, z / 1.2)); return; }
+          const r = vp.getBoundingClientRect();
+          zoomAtPoint(r.x + r.width / 2, r.y + r.height / 2, 1 / 1.2);
+        }} title="Zoom out">−</button>
         <span className="zoom-readout">{Math.round(userZoom * 100)}%</span>
-        <button className="ctrl-btn" onClick={() => setUserZoom(z => Math.min(8, z * 1.2))} title="Zoom in">+</button>
-        <button className="ctrl-btn" onClick={() => setUserZoom(1)} title="Reset zoom">100%</button>
+        <button className="ctrl-btn" onClick={() => {
+          const vp = viewportRef.current;
+          if (!vp) { setUserZoom(z => Math.min(8, z * 1.2)); return; }
+          const r = vp.getBoundingClientRect();
+          zoomAtPoint(r.x + r.width / 2, r.y + r.height / 2, 1.2);
+        }} title="Zoom in">+</button>
+        <button className="ctrl-btn" onClick={() => {
+          setUserZoom(1); setSceneOffset({ x: 0, y: 0 });
+        }} title="Reset zoom">100%</button>
 
         {adminMode && (
           <>

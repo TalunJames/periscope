@@ -38,6 +38,29 @@ const MAX_SHARE_BYTES = 256 * 1024; // generous: configs with many annotations
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(SHARES_DIR, { recursive: true });
 
+// Build identifier appended as a `?v=…` query string to every static asset
+// referenced from index.html, so Cloudflare (and the browser) see a fresh
+// URL on every deploy and never serve a stale CSS/JSX against a newer HTML.
+// Sourced from env (BUILD_ID — set in CI / Dockerfile at build time) or
+// falls back to the max mtime across all served assets, which catches any
+// JSX/CSS/HTML edit in dev as well as fresh Docker image builds.
+const BUILD_ID = (() => {
+  if (process.env.BUILD_ID) return String(process.env.BUILD_ID).slice(0, 16);
+  try {
+    const files = ['index.html', 'app.jsx', 'viewer.jsx', 'editor.jsx', 'styles.css'];
+    let maxMtime = 0;
+    for (const f of files) {
+      try {
+        const stat = fs.statSync(path.join(STATIC_DIR, f));
+        if (stat.mtimeMs > maxMtime) maxMtime = stat.mtimeMs;
+      } catch {}
+    }
+    return Math.floor(maxMtime || Date.now()).toString(36);
+  } catch {
+    return Date.now().toString(36);
+  }
+})();
+
 const SAMPLE_SRC = path.join(__dirname, 'seed-uploads');
 if (fs.existsSync(SAMPLE_SRC)) {
   for (const f of fs.readdirSync(SAMPLE_SRC)) {
@@ -269,23 +292,57 @@ app.get('/uploads/:filename', (req, res) => {
   });
 });
 
-// Static app
+// Read index.html once at startup and rewrite the script/stylesheet URLs
+// to include a `?v=<BUILD_ID>` cache-buster. Cloudflare and browsers key
+// their cache on the full URL, so every deploy gets a fresh cache entry —
+// no more stale CSS against a new HTML.
+const INDEX_HTML = (() => {
+  try {
+    const raw = fs.readFileSync(path.join(STATIC_DIR, 'index.html'), 'utf8');
+    return raw.replace(
+      /(<(?:script|link)[^>]*\s(?:src|href)=")(\/(?:styles\.css|app\.jsx|viewer\.jsx|editor\.jsx))(")/g,
+      `$1$2?v=${BUILD_ID}$3`
+    );
+  } catch (e) {
+    console.warn('Could not preload index.html:', e.message);
+    return null;
+  }
+})();
+
+// Static app — assets only. HTML and the SPA shell are handled below so
+// we can serve the cache-busted version.
 app.use(express.static(STATIC_DIR, {
-  index: 'index.html',
+  index: false,
   setHeaders: (res, p) => {
     if (/\.html$/i.test(p)) {
+      // Should not be reached (HTML handled below), but guard anyway.
       res.setHeader('Cache-Control', 'no-store, must-revalidate');
     } else if (/\.(jsx|css)$/i.test(p)) {
-      res.setHeader('Cache-Control', 'public, max-age=60');
+      // The HTML always references these with ?v=<BUILD_ID>, so a long
+      // immutable cache is safe — a new deploy uses a new query string.
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    } else if (/\.(png|jpe?g|gif|svg|webp|ico)$/i.test(p)) {
+      res.setHeader('Cache-Control', 'public, max-age=86400');
     }
   },
 }));
 
+// HTML routes — root and SPA-style fallback. Always serve the rewritten
+// index.html with strong "do not cache" headers (Cloudflare honors these
+// for HTML by default unless a Page Rule overrides).
+function sendIndex(req, res) {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  if (INDEX_HTML) {
+    res.type('html').send(INDEX_HTML);
+  } else {
+    res.sendFile(path.join(STATIC_DIR, 'index.html'));
+  }
+}
+app.get('/', sendIndex);
 // SPA-style fallback: any unmatched GET serves index.html so share-link
-// `#hash` URLs keep working regardless of path.
-app.get('*', (req, res) => {
-  res.sendFile(path.join(STATIC_DIR, 'index.html'));
-});
+// URLs (and legacy `#c=…` hashes) keep working regardless of path.
+app.get('*', sendIndex);
 
 // JSON-style error handler — keeps the API consistent on unexpected errors.
 app.use((err, req, res, next) => {
