@@ -518,6 +518,13 @@ const MailerViewer = ({
     rz: tearOffset.rot + tear * 10,
   }), [tear, tearOffset, vertical]);
 
+  // Threshold above which background drag pans (translates) the scene
+  // instead of orbiting the camera. Below this we keep the original
+  // orbit-on-drag behavior so the 3D preview still feels interactive
+  // at default zoom; above this the user is clearly trying to read
+  // text on the PDF and wants to scroll around the zoomed-in artwork.
+  const PAN_ZOOM_THRESHOLD = 1.2;
+
   // ---------- pointer handling ----------
   const onPointerDown = (e) => {
     if (e.target.closest('.no-orbit')) return;
@@ -526,6 +533,11 @@ const MailerViewer = ({
       dragRef.current = { type: 'tear', startX: e.clientX, startY: e.clientY, tearStart: tear };
     } else if (role === 'torn-piece') {
       dragRef.current = { type: 'move-piece', startX: e.clientX, startY: e.clientY, posStart: { ...tearOffset } };
+    } else if (userZoom > PAN_ZOOM_THRESHOLD) {
+      // When zoomed in, plain drag pans the scene so the user can read
+      // across the whole PDF. Tracks the starting sceneOffset and updates
+      // it in pointermove based on the cumulative cursor delta.
+      dragRef.current = { type: 'pan', startX: e.clientX, startY: e.clientY, offsetStart: { ...sceneOffset } };
     } else {
       dragRef.current = { type: 'orbit', startX: e.clientX, startY: e.clientY, camStart: { ...camera } };
     }
@@ -544,6 +556,11 @@ const MailerViewer = ({
         x: clamp(d.camStart.x - dy * 0.35, -85, 85),
         y: d.camStart.y + dx * 0.45,
       });
+    } else if (d.type === 'pan') {
+      // 1:1 pixel pan — drag exactly translates the scene under the cursor.
+      const dx = e.clientX - d.startX;
+      const dy = e.clientY - d.startY;
+      setSceneOffset({ x: d.offsetStart.x + dx, y: d.offsetStart.y + dy });
     } else if (d.type === 'tear') {
       // Drag perpendicular-to-perforation to tear: for vertical fold, that's vertical drag.
       const delta = vertical
@@ -1163,7 +1180,11 @@ const MailerViewer = ({
 
       {/* Hints */}
       <div className="hint">
-        <div className="hint-row"><span className="hint-key">drag bg</span><span>orbit</span></div>
+        <div className="hint-row">
+          <span className="hint-key">drag bg</span>
+          <span>{userZoom > PAN_ZOOM_THRESHOLD ? 'pan' : 'orbit'}</span>
+        </div>
+        <div className="hint-row"><span className="hint-key">dbl-click</span><span>zoom here</span></div>
         <div className="hint-row"><span className="hint-key">slider</span><span>unfold</span></div>
         <div className="hint-row"><span className="hint-key">drop pdf</span><span>swap</span></div>
         {fold > 0.85 && !torn && config.showPerforation && config.tearPanel != null && (
