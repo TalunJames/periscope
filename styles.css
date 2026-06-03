@@ -505,6 +505,13 @@ input, select, textarea { font-family: inherit; }
   letter-spacing: 0.04em;
   text-transform: none;
   font-size: 14px;
+  text-align: center;
+}
+.loading-overlay .err-client {
+  color: rgba(255, 255, 255, 0.88);
+  font-weight: 500;
+  font-size: 15px;
+  line-height: 1.55;
 }
 .loading-overlay small {
   display: block;
@@ -1375,3 +1382,117 @@ select.edt-field {
   background: rgba(0,0,0,0.2);
 }
 .editor-footer .edt-btn { width: auto; padding: 10px 22px; }
+
+/* ===========================================================
+   HOMEPAGE — access-code landing
+   =========================================================== */
+.home {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+}
+
+.home-card {
+  width: min(100%, 380px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 40px 32px 36px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.home-logo {
+  width: 120px;
+  height: auto;
+  object-fit: contain;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.35));
+  margin-bottom: 20px;
+}
+
+.home-title {
+  margin: 0;
+  font-family: 'Archivo', sans-serif;
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.96);
+}
+
+.home-tagline {
+  margin: 6px 0 28px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.home-form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.home-label {
+  align-self: flex-start;
+  font-family: 'Archivo', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.home-input {
+  width: 100%;
+  padding: 13px 16px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.28);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 15px;
+  letter-spacing: 0.08em;
+  text-align: center;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.home-input::placeholder {
+  color: rgba(255, 255, 255, 0.28);
+  letter-spacing: 0.04em;
+}
+.home-input:focus {
+  border-color: rgba(200, 65, 46, 0.55);
+  box-shadow: 0 0 0 3px rgba(200, 65, 46, 0.15);
+}
+
+.home-submit {
+  margin-top: 6px;
+  width: 100%;
+  padding: 13px 16px;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-deep) 100%);
+  color: #fff;
+  font-family: 'Archivo', sans-serif;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  box-shadow: 0 4px 16px rgba(200, 65, 46, 0.35);
+  transition: transform 0.12s, box-shadow 0.12s, filter 0.12s;
+}
+.home-submit:hover {
+  filter: brightness(1.06);
+  box-shadow: 0 6px 20px rgba(200, 65, 46, 0.42);
+}
+.home-submit:active {
+  transform: translateY(1px);
+}

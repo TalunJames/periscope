@@ -1,4 +1,4 @@
-/* global React, ReactDOM, pdfjsLib, MailerViewer, MailerEditor */
+/* global React, ReactDOM, pdfjsLib, MailerViewer, MailerEditor, Homepage */
 /* eslint-disable */
 
 // =====================================================================
@@ -10,6 +10,8 @@ const { useState, useRef, useEffect, useCallback } = React;
 const SAMPLE_PDF_URL = '/uploads/Listening_FSS_CSSD_Tier3_1_1c.pdf';
 const STORAGE_KEY = 'mailerViewerConfig_v1';
 const TOKEN_STORAGE_KEY = 'mailerAdminToken_v1';
+const CLIENT_ACCESS_MSG =
+  'That access code didn\u2019t work. Please contact your Fog Signal Strategies representative.';
 // Per-PDF title/description map: { [pdfUrl]: { title, description } }.
 // Kept separate from the main config so switching PDFs restores the right
 // human-friendly strings instead of carrying them across mailers.
@@ -125,6 +127,17 @@ function extractShareId() {
   m = (location.search || '').match(/[?&]s=([a-z0-9]{6,32})\b/i);
   if (m) return m[1].toLowerCase();
   return null;
+}
+
+// True when the URL is a share link (short path or legacy hash).
+function isShareView() {
+  return !!extractShareId() || !!decodeSharedConfig();
+}
+
+// True when the user has passed the homepage gate (/app).
+function isAppPath() {
+  if (typeof location === 'undefined') return false;
+  return /^\/app\/?$/i.test(location.pathname || '');
 }
 
 function loadConfig() {
@@ -340,7 +353,7 @@ const DropZone = ({ onPdf }) => {
 // ---------------------------------------------------------------------
 // Loading overlay
 // ---------------------------------------------------------------------
-const LoadingOverlay = ({ status, error, name }) => {
+const LoadingOverlay = ({ status, error, name, clientFacing }) => {
   if (status === 'ready') return null;
   return (
     <div className="loading-overlay">
@@ -352,9 +365,13 @@ const LoadingOverlay = ({ status, error, name }) => {
         </div>
       )}
       {status === 'error' && (
-        <div className="err">
-          Couldn't load that PDF.<br/>
-          <small>{error}</small>
+        <div className={`err${clientFacing ? ' err-client' : ''}`}>
+          {clientFacing ? CLIENT_ACCESS_MSG : (
+            <>
+              Couldn&apos;t load that PDF.<br/>
+              <small>{error}</small>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -362,9 +379,9 @@ const LoadingOverlay = ({ status, error, name }) => {
 };
 
 // ---------------------------------------------------------------------
-// App root
+// Mailer app — viewer, editor, PDF loading, library API.
 // ---------------------------------------------------------------------
-const App = () => {
+const MailerApp = () => {
   const [config, setConfig] = useState(loadConfig);
   const [pages, setPages] = useState(null);
   const [loadStatus, setLoadStatus] = useState('loading');
@@ -512,7 +529,9 @@ const App = () => {
 
   // If the URL points at a short share (/s/<id>), fetch the stored config
   // and overlay it on top of defaults. Done once on mount.
-  const [shareError, setShareError] = useState(null);
+  const [shareLoadState, setShareLoadState] = useState(
+    () => (initialShareId ? 'pending' : 'n/a')
+  );
   useEffect(() => {
     if (!initialShareId) return;
     let cancelled = false;
@@ -521,8 +540,9 @@ const App = () => {
         const { config: shared } = await lib.fetchShare(initialShareId);
         if (cancelled || !shared) return;
         setConfig(c => ({ ...DEFAULT_CONFIG, ...shared, pdfDataUrl: null }));
+        setShareLoadState('ok');
       } catch (e) {
-        if (!cancelled) setShareError(e.message);
+        if (!cancelled) setShareLoadState('error');
       }
     })();
     return () => { cancelled = true; };
@@ -579,6 +599,7 @@ const App = () => {
 
   // Load PDF whenever pdfUrl / pdfDataUrl or render resolution changes
   useEffect(() => {
+    if (shareLoadState === 'pending' || shareLoadState === 'error') return;
     let cancelled = false;
     // Priority: server URL → local data URL → bundled sample.
     const src = config.pdfUrl
@@ -632,7 +653,7 @@ const App = () => {
         setLoadStatus('error');
       });
     return () => { cancelled = true; };
-  }, [config.pdfUrl, config.pdfDataUrl, effectiveRenderScale]);
+  }, [config.pdfUrl, config.pdfDataUrl, effectiveRenderScale, shareLoadState]);
 
   // Drag-drop handler. When the server is available we upload the file
   // straight into the library (so it's instantly sharable); otherwise we
@@ -697,9 +718,40 @@ const App = () => {
         />
       )}
       <DropZone onPdf={handleDroppedPdf} />
-      <LoadingOverlay status={loadStatus} error={loadErr} name={config.pdfName} />
+      <LoadingOverlay
+        status={shareLoadState === 'error' ? 'error' : loadStatus}
+        error={loadErr}
+        name={config.pdfName}
+        clientFacing={!adminMode}
+      />
     </>
   );
+};
+
+// ---------------------------------------------------------------------
+// App root — homepage at /, mailer at /app and share URLs.
+// ---------------------------------------------------------------------
+const App = () => {
+  const [showMailer, setShowMailer] = useState(() => isShareView() || isAppPath());
+
+  useEffect(() => {
+    const sync = () => setShowMailer(isShareView() || isAppPath());
+    window.addEventListener('popstate', sync);
+    return () => window.removeEventListener('popstate', sync);
+  }, []);
+
+  const enterMailer = useCallback((accessCode) => {
+    const code = (accessCode || '').trim().toLowerCase();
+    if (!code) return;
+    history.pushState(null, '', `/s/${encodeURIComponent(code)}`);
+    setShowMailer(true);
+  }, []);
+
+  if (!showMailer) {
+    return <Homepage onEnter={enterMailer} />;
+  }
+
+  return <MailerApp />;
 };
 
 // data URL works directly with pdf.js; the helper here mostly exists to

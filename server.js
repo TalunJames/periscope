@@ -47,7 +47,7 @@ fs.mkdirSync(SHARES_DIR, { recursive: true });
 const BUILD_ID = (() => {
   if (process.env.BUILD_ID) return String(process.env.BUILD_ID).slice(0, 16);
   try {
-    const files = ['index.html', 'app.jsx', 'viewer.jsx', 'editor.jsx', 'styles.css'];
+    const files = ['index.html', 'app.jsx', 'viewer.jsx', 'editor.jsx', 'homepage.jsx', 'styles.css'];
     let maxMtime = 0;
     for (const f of files) {
       try {
@@ -300,7 +300,7 @@ const INDEX_HTML = (() => {
   try {
     const raw = fs.readFileSync(path.join(STATIC_DIR, 'index.html'), 'utf8');
     return raw.replace(
-      /(<(?:script|link)[^>]*\s(?:src|href)=")(\/(?:styles\.css|app\.jsx|viewer\.jsx|editor\.jsx))(")/g,
+      /(<(?:script|link)[^>]*\s(?:src|href)=")(\/(?:styles\.css|app\.jsx|viewer\.jsx|editor\.jsx|homepage\.jsx))(")/g,
       `$1$2?v=${BUILD_ID}$3`
     );
   } catch (e) {
