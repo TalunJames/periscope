@@ -1472,6 +1472,17 @@ select.edt-field {
   border-color: rgba(200, 65, 46, 0.55);
   box-shadow: 0 0 0 3px rgba(200, 65, 46, 0.15);
 }
+.home-input:disabled {
+  opacity: 0.55;
+}
+
+.home-error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: rgba(255, 180, 160, 0.92);
+  text-align: left;
+}
 
 .home-submit {
   margin-top: 6px;
@@ -1495,4 +1506,9 @@ select.edt-field {
 }
 .home-submit:active {
   transform: translateY(1px);
+}
+.home-submit:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+  transform: none;
 }
