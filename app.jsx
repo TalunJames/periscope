@@ -1,4 +1,4 @@
-/* global React, ReactDOM, pdfjsLib, MailerViewer, MailerEditor */
+/* global React, ReactDOM, pdfjsLib, MailerViewer, MailerEditor, Homepage */
 /* eslint-disable */
 
 // =====================================================================
@@ -125,6 +125,17 @@ function extractShareId() {
   m = (location.search || '').match(/[?&]s=([a-z0-9]{6,32})\b/i);
   if (m) return m[1].toLowerCase();
   return null;
+}
+
+// True when the URL is a share link (short path or legacy hash).
+function isShareView() {
+  return !!extractShareId() || !!decodeSharedConfig();
+}
+
+// True when the user has passed the homepage gate (/app).
+function isAppPath() {
+  if (typeof location === 'undefined') return false;
+  return /^\/app\/?$/i.test(location.pathname || '');
 }
 
 function loadConfig() {
@@ -362,9 +373,9 @@ const LoadingOverlay = ({ status, error, name }) => {
 };
 
 // ---------------------------------------------------------------------
-// App root
+// Mailer app — viewer, editor, PDF loading, library API.
 // ---------------------------------------------------------------------
-const App = () => {
+const MailerApp = () => {
   const [config, setConfig] = useState(loadConfig);
   const [pages, setPages] = useState(null);
   const [loadStatus, setLoadStatus] = useState('loading');
@@ -700,6 +711,32 @@ const App = () => {
       <LoadingOverlay status={loadStatus} error={loadErr} name={config.pdfName} />
     </>
   );
+};
+
+// ---------------------------------------------------------------------
+// App root — homepage at /, mailer at /app and share URLs.
+// ---------------------------------------------------------------------
+const App = () => {
+  const [showMailer, setShowMailer] = useState(() => isShareView() || isAppPath());
+
+  useEffect(() => {
+    const sync = () => setShowMailer(isShareView() || isAppPath());
+    window.addEventListener('popstate', sync);
+    return () => window.removeEventListener('popstate', sync);
+  }, []);
+
+  const enterMailer = useCallback((_accessCode) => {
+    // Access-code validation will be wired up later; for now Enter
+    // just opens the app so the field can be styled and tested.
+    history.pushState(null, '', '/app');
+    setShowMailer(true);
+  }, []);
+
+  if (!showMailer) {
+    return <Homepage onEnter={enterMailer} />;
+  }
+
+  return <MailerApp />;
 };
 
 // data URL works directly with pdf.js; the helper here mostly exists to
