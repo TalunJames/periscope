@@ -10,6 +10,8 @@ const { useState, useRef, useEffect, useCallback } = React;
 const SAMPLE_PDF_URL = '/uploads/Listening_FSS_CSSD_Tier3_1_1c.pdf';
 const STORAGE_KEY = 'mailerViewerConfig_v1';
 const TOKEN_STORAGE_KEY = 'mailerAdminToken_v1';
+const CLIENT_ACCESS_MSG =
+  'That access code didn\u2019t work. Please contact your Fog Signal Strategies representative.';
 // Per-PDF title/description map: { [pdfUrl]: { title, description } }.
 // Kept separate from the main config so switching PDFs restores the right
 // human-friendly strings instead of carrying them across mailers.
@@ -351,7 +353,7 @@ const DropZone = ({ onPdf }) => {
 // ---------------------------------------------------------------------
 // Loading overlay
 // ---------------------------------------------------------------------
-const LoadingOverlay = ({ status, error, name }) => {
+const LoadingOverlay = ({ status, error, name, clientFacing }) => {
   if (status === 'ready') return null;
   return (
     <div className="loading-overlay">
@@ -363,9 +365,13 @@ const LoadingOverlay = ({ status, error, name }) => {
         </div>
       )}
       {status === 'error' && (
-        <div className="err">
-          Couldn't load that PDF.<br/>
-          <small>{error}</small>
+        <div className={`err${clientFacing ? ' err-client' : ''}`}>
+          {clientFacing ? CLIENT_ACCESS_MSG : (
+            <>
+              Couldn&apos;t load that PDF.<br/>
+              <small>{error}</small>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -523,7 +529,9 @@ const MailerApp = () => {
 
   // If the URL points at a short share (/s/<id>), fetch the stored config
   // and overlay it on top of defaults. Done once on mount.
-  const [shareError, setShareError] = useState(null);
+  const [shareLoadState, setShareLoadState] = useState(
+    () => (initialShareId ? 'pending' : 'n/a')
+  );
   useEffect(() => {
     if (!initialShareId) return;
     let cancelled = false;
@@ -532,8 +540,9 @@ const MailerApp = () => {
         const { config: shared } = await lib.fetchShare(initialShareId);
         if (cancelled || !shared) return;
         setConfig(c => ({ ...DEFAULT_CONFIG, ...shared, pdfDataUrl: null }));
+        setShareLoadState('ok');
       } catch (e) {
-        if (!cancelled) setShareError(e.message);
+        if (!cancelled) setShareLoadState('error');
       }
     })();
     return () => { cancelled = true; };
@@ -590,6 +599,7 @@ const MailerApp = () => {
 
   // Load PDF whenever pdfUrl / pdfDataUrl or render resolution changes
   useEffect(() => {
+    if (shareLoadState === 'pending' || shareLoadState === 'error') return;
     let cancelled = false;
     // Priority: server URL → local data URL → bundled sample.
     const src = config.pdfUrl
@@ -643,7 +653,7 @@ const MailerApp = () => {
         setLoadStatus('error');
       });
     return () => { cancelled = true; };
-  }, [config.pdfUrl, config.pdfDataUrl, effectiveRenderScale]);
+  }, [config.pdfUrl, config.pdfDataUrl, effectiveRenderScale, shareLoadState]);
 
   // Drag-drop handler. When the server is available we upload the file
   // straight into the library (so it's instantly sharable); otherwise we
@@ -708,7 +718,12 @@ const MailerApp = () => {
         />
       )}
       <DropZone onPdf={handleDroppedPdf} />
-      <LoadingOverlay status={loadStatus} error={loadErr} name={config.pdfName} />
+      <LoadingOverlay
+        status={shareLoadState === 'error' ? 'error' : loadStatus}
+        error={loadErr}
+        name={config.pdfName}
+        clientFacing={!adminMode}
+      />
     </>
   );
 };
@@ -725,10 +740,10 @@ const App = () => {
     return () => window.removeEventListener('popstate', sync);
   }, []);
 
-  const enterMailer = useCallback((_accessCode) => {
-    // Access-code validation will be wired up later; for now Enter
-    // just opens the app so the field can be styled and tested.
-    history.pushState(null, '', '/app');
+  const enterMailer = useCallback((accessCode) => {
+    const code = (accessCode || '').trim().toLowerCase();
+    if (!code) return;
+    history.pushState(null, '', `/s/${encodeURIComponent(code)}`);
     setShowMailer(true);
   }, []);
 

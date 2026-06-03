@@ -505,6 +505,13 @@ input, select, textarea { font-family: inherit; }
   letter-spacing: 0.04em;
   text-transform: none;
   font-size: 14px;
+  text-align: center;
+}
+.loading-overlay .err-client {
+  color: rgba(255, 255, 255, 0.88);
+  font-weight: 500;
+  font-size: 15px;
+  line-height: 1.55;
 }
 .loading-overlay small {
   display: block;
