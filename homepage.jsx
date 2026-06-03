@@ -3,13 +3,13 @@
 
 const { useState } = React;
 
-function Homepage({ onEnter }) {
+function Homepage({ onEnter, accessError, accessBusy, accessErrorMsg, onClearError }) {
   const [accessCode, setAccessCode] = useState('');
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    // Access-code validation will be wired up later.
-    if (onEnter) onEnter(accessCode);
+    if (accessBusy) return;
+    if (onEnter) await onEnter(accessCode);
   };
 
   return (
@@ -32,13 +32,20 @@ function Homepage({ onEnter }) {
             className="home-input"
             type="text"
             value={accessCode}
-            onChange={(e) => setAccessCode(e.target.value)}
+            onChange={(e) => {
+              setAccessCode(e.target.value);
+              if (accessError) onClearError?.();
+            }}
             placeholder="Enter your code"
             autoComplete="off"
             spellCheck={false}
+            disabled={accessBusy}
           />
-          <button className="home-submit" type="submit">
-            Enter
+          {accessError && (
+            <p className="home-error" role="alert">{accessErrorMsg}</p>
+          )}
+          <button className="home-submit" type="submit" disabled={accessBusy}>
+            {accessBusy ? 'Checking…' : 'Enter'}
           </button>
         </form>
       </div>

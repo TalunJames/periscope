@@ -12,6 +12,7 @@ const STORAGE_KEY = 'mailerViewerConfig_v1';
 const TOKEN_STORAGE_KEY = 'mailerAdminToken_v1';
 const CLIENT_ACCESS_MSG =
   'That access code didn\u2019t work. Please contact your Fog Signal Strategies representative.';
+const ACCESS_CODE_RE = /^[a-z0-9]{6,32}$/;
 // Per-PDF title/description map: { [pdfUrl]: { title, description } }.
 // Kept separate from the main config so switching PDFs restores the right
 // human-friendly strings instead of carrying them across mailers.
@@ -138,6 +139,20 @@ function isShareView() {
 function isAppPath() {
   if (typeof location === 'undefined') return false;
   return /^\/app\/?$/i.test(location.pathname || '');
+}
+
+// /s/… or /share/… present but id doesn't match the share-id format.
+function isMalformedSharePath() {
+  if (typeof location === 'undefined') return false;
+  const p = location.pathname || '';
+  if (!/^\/(?:s|share)\/.+/i.test(p)) return false;
+  return !extractShareId();
+}
+
+function resolveView() {
+  if (isMalformedSharePath()) return { mailer: false, accessError: true };
+  if (isShareView() || isAppPath()) return { mailer: true, accessError: false };
+  return { mailer: false, accessError: false };
 }
 
 function loadConfig() {
@@ -681,6 +696,23 @@ const MailerApp = () => {
     setConfig({ ...DEFAULT_CONFIG });
   };
 
+  // Client share view — hold on the error/loading screen, not the mailer UI.
+  if (initialShareId && shareLoadState !== 'ok') {
+    return (
+      <LoadingOverlay
+        status={shareLoadState === 'error' ? 'error' : 'loading'}
+        error={null}
+        name="preview"
+        clientFacing
+      />
+    );
+  }
+  if (!adminMode && loadStatus === 'error') {
+    return (
+      <LoadingOverlay status="error" error={null} name="" clientFacing />
+    );
+  }
+
   return (
     <>
       <window.MailerViewer
@@ -732,23 +764,51 @@ const MailerApp = () => {
 // App root — homepage at /, mailer at /app and share URLs.
 // ---------------------------------------------------------------------
 const App = () => {
-  const [showMailer, setShowMailer] = useState(() => isShareView() || isAppPath());
+  const [showMailer, setShowMailer] = useState(() => resolveView().mailer);
+  const [accessError, setAccessError] = useState(() => resolveView().accessError);
+  const [accessBusy, setAccessBusy] = useState(false);
 
   useEffect(() => {
-    const sync = () => setShowMailer(isShareView() || isAppPath());
+    const sync = () => {
+      const v = resolveView();
+      setShowMailer(v.mailer);
+      setAccessError(v.accessError);
+    };
     window.addEventListener('popstate', sync);
     return () => window.removeEventListener('popstate', sync);
   }, []);
 
-  const enterMailer = useCallback((accessCode) => {
+  const enterMailer = useCallback(async (accessCode) => {
     const code = (accessCode || '').trim().toLowerCase();
+    setAccessError(false);
     if (!code) return;
-    history.pushState(null, '', `/s/${encodeURIComponent(code)}`);
-    setShowMailer(true);
+    if (!ACCESS_CODE_RE.test(code)) {
+      setAccessError(true);
+      return;
+    }
+    setAccessBusy(true);
+    try {
+      const res = await fetch(`/api/shares/${encodeURIComponent(code)}`);
+      if (!res.ok) throw new Error();
+      history.pushState(null, '', `/s/${code}`);
+      setShowMailer(true);
+    } catch {
+      setAccessError(true);
+    } finally {
+      setAccessBusy(false);
+    }
   }, []);
 
   if (!showMailer) {
-    return <Homepage onEnter={enterMailer} />;
+    return (
+      <Homepage
+        onEnter={enterMailer}
+        accessError={accessError}
+        accessBusy={accessBusy}
+        accessErrorMsg={CLIENT_ACCESS_MSG}
+        onClearError={() => setAccessError(false)}
+      />
+    );
   }
 
   return <MailerApp />;
